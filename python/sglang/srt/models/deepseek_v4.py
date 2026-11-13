@@ -5658,8 +5658,6 @@ class DeepseekV4ForCausalLM(nn.Module):
                             if channel_int4:
                                 if name.endswith(".weight_scale"):
                                     loaded_weight = loaded_weight * 16.0
-                                elif name.endswith(".weight"):
-                                    loaded_weight = _unpack_channel_int4(loaded_weight)
                             weight_loader = param.weight_loader
                             maybe_executor_submit(
                                 executor=executor,
@@ -6017,9 +6015,3 @@ def _fuse_deepseek_v4_wqkv_a_pair(
         return q
     return torch.cat([q, kv], dim=0)
 
-
-def _unpack_channel_int4(weight: torch.Tensor) -> torch.Tensor:
-    """Expand signed high-nibble-first INT4 for the Triton INT8 MoE runner."""
-    high = weight >> 4
-    low = (weight << 4) >> 4
-    return torch.stack((high, low), dim=-1).flatten(-2)

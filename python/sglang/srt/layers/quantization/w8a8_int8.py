@@ -244,6 +244,8 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
+    weight_pack_factor = 1
+
     def __init__(self, quant_config: W8A8Int8Config):
         self.quant_config = quant_config
 
@@ -263,7 +265,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size,
+                hidden_size // self.weight_pack_factor,
                 dtype=torch.int8,
             ),
             requires_grad=False,
@@ -275,7 +277,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition,
+                intermediate_size_per_partition // self.weight_pack_factor,
                 dtype=torch.int8,
             ),
             requires_grad=False,
@@ -399,9 +401,21 @@ class SlimQuantW4A8Config(W8A8Int8Config):
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
+        from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 
+        if isinstance(layer, FusedMoE):
+            return PackedInt4MoEMethod(self)
         if isinstance(layer, LinearBase) and prefix.endswith(
             (".weights_proj", ".wo_a")
         ):
             return UnquantizedLinearMethod()
         return super().get_quant_method(layer, prefix)
+
+
+class PackedInt4MoEMethod(W8A8Int8MoEMethod):
+    weight_pack_factor = 2
+
+    def get_triton_quant_info(self, layer: torch.nn.Module) -> TritonMoeQuantInfo:
+        quant_info = super().get_triton_quant_info(layer)
+        quant_info.use_packed_int4 = True
+        return quant_info

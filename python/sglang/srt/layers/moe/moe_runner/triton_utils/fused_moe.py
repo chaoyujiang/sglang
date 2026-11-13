@@ -199,6 +199,7 @@ def inplace_fused_experts(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    use_packed_int4: bool = False,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -233,6 +234,7 @@ def inplace_fused_experts(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         fuse_swiglu_interleaved=fuse_swiglu_interleaved,
+        use_packed_int4=use_packed_int4,
     )
 
 
@@ -269,6 +271,7 @@ def outplace_fused_experts(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    use_packed_int4: bool = False,
     no_combine_keep_router_weight: bool = False,
 ) -> torch.Tensor:
     return fused_experts_impl(
@@ -304,6 +307,7 @@ def outplace_fused_experts(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         fuse_swiglu_interleaved=fuse_swiglu_interleaved,
+        use_packed_int4=use_packed_int4,
         no_combine_keep_router_weight=no_combine_keep_router_weight,
     )
 
@@ -330,6 +334,7 @@ def fused_experts(
     block_shape: Optional[List[int]] = None,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    use_packed_int4: bool = False,
 ):
     topk_weights, topk_ids, _ = topk_output
     filter_expert = (
@@ -369,6 +374,7 @@ def fused_experts(
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
             fuse_swiglu_interleaved=fuse_swiglu_interleaved,
+            use_packed_int4=use_packed_int4,
         )
         return hidden_states
     else:
@@ -404,6 +410,7 @@ def fused_experts(
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
             fuse_swiglu_interleaved=fuse_swiglu_interleaved,
+            use_packed_int4=use_packed_int4,
             no_combine_keep_router_weight=moe_runner_config.no_combine_keep_router_weight,
         )
 
@@ -458,6 +465,7 @@ def _prepare_fused_moe_run(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: Optional[List[int]],
+    use_packed_int4: bool = False,
 ):
     """Resolve config, down_config, TMA flag, and aligned expert routing ids.
 
@@ -465,7 +473,7 @@ def _prepare_fused_moe_run(
     both paths compute alignment from the same source.
     """
     padded_size = padding_size
-    if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
+    if use_packed_int4 or not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
         padded_size = 0
 
     num_tokens = hidden_states.shape[0]
@@ -478,9 +486,10 @@ def _prepare_fused_moe_run(
         dtype=hidden_states.dtype,
     )
 
+    pack_factor = 2 if use_packed_int4 else 1
     config, (down_config, _) = try_get_optimal_moe_config(
-        w1.shape,
-        (w2.shape[0], w2.shape[1], w2.shape[2] - padded_size),
+        (*w1.shape[:2], w1.shape[2] * pack_factor),
+        (*w2.shape[:2], w2.shape[2] * pack_factor - padded_size),
         topk_ids.shape[1],
         config_dtype,
         num_tokens,
@@ -499,6 +508,7 @@ def _prepare_fused_moe_run(
     # Config lookup does not include hidden size; TMA needs aligned outer strides.
     up_moe_use_tma = (
         _moe_support_tma()
+        and not use_packed_int4
         and up_tma_requested
         and all(stride * w1.element_size() % 16 == 0 for stride in w1.stride()[:-1])
     )
@@ -508,7 +518,7 @@ def _prepare_fused_moe_run(
             "This requires a config produced by the updated tuning script. "
         )
     down_tma_requested = down_config is not None and down_config.pop("USE_TMA", False)
-    down_moe_use_tma = _moe_support_tma() and down_tma_requested
+    down_moe_use_tma = not use_packed_int4 and _moe_support_tma() and down_tma_requested
     if down_moe_use_tma:
         logger.warning_once(
             "Down MoE TMA is enabled (USE_TMA=true in the down-projection config)."
@@ -571,6 +581,7 @@ def _fused_moe_kernel_sequence(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    use_packed_int4: bool = False,
     defer_sum: bool = False,
     no_combine_keep_router_weight: bool = False,
 ) -> torch.Tensor:
@@ -702,6 +713,7 @@ def _fused_moe_kernel_sequence(
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
+        use_packed_int4=use_packed_int4,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         c_sorted=down_moe_use_tma,
@@ -985,6 +997,7 @@ def _fused_moe_kernel_sequence(
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
+        use_packed_int4=use_packed_int4,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         a_use_tma=down_moe_use_tma,
@@ -1152,16 +1165,17 @@ def fused_experts_impl(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    use_packed_int4: bool = False,
     defer_sum: bool = False,
     no_combine_keep_router_weight: bool = False,
 ):
     padded_size = padding_size
-    if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
+    if use_packed_int4 or not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
         padded_size = 0
 
     # Check constraints.
-    if use_int4_w4a16:
-        assert hidden_states.shape[1] // 2 == w1.shape[2], "Hidden size mismatch"
+    if use_int4_w4a16 or use_packed_int4:
+        assert hidden_states.shape[1] == 2 * w1.shape[2], "Hidden size mismatch"
     else:
         assert hidden_states.shape[1] == w1.shape[2] - padded_size, (
             "Hidden size mismatch"
@@ -1191,6 +1205,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
+        use_packed_int4=use_packed_int4,
     )
 
     return _fused_moe_kernel_sequence(
@@ -1234,6 +1249,7 @@ def fused_experts_impl(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         fuse_swiglu_interleaved=fuse_swiglu_interleaved,
+        use_packed_int4=use_packed_int4,
         defer_sum=defer_sum,
         no_combine_keep_router_weight=no_combine_keep_router_weight,
     )

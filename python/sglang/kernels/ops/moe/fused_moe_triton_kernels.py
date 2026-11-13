@@ -360,6 +360,7 @@ def fused_moe_kernel(
     compute_type: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
     use_int8_w8a8: tl.constexpr,
+    use_packed_int4: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     even_Ks: tl.constexpr,
@@ -490,10 +491,11 @@ def fused_moe_kernel(
     if b_desc is not None:
         start_offs_n = pid_n * BLOCK_SIZE_N
     else:
+        weight_k = offs_k // 2 if use_packed_int4 else offs_k
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
-            + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+            + (weight_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
         )
 
     if bias_ptr is not None:
@@ -573,6 +575,11 @@ def fused_moe_kernel(
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
 
+        if use_packed_int4:
+            # Signed two's-complement, even K in the high nibble.
+            low = (b << 4).to(tl.int8) >> 4
+            b = tl.where(offs_k[:, None] % 2 == 0, b >> 4, low).to(tl.int8)
+
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -607,7 +614,7 @@ def fused_moe_kernel(
         if a_desc is None:
             a_ptrs += BLOCK_SIZE_K * stride_ak
         if b_desc is None:
-            b_ptrs += BLOCK_SIZE_K * stride_bk
+            b_ptrs += (BLOCK_SIZE_K // 2 if use_packed_int4 else BLOCK_SIZE_K) * stride_bk
 
     if swap_ab:
         accumulator = tl.trans(accumulator, (1, 0))
@@ -834,6 +841,7 @@ def invoke_fused_moe_kernel(
     lora_preserve_base: bool = False,
     fuse_swiglu: bool = False,
     a_output_slices: int = 1,
+    use_packed_int4: bool = False,
 ) -> None:
     """Skip inactive experts, including with filter_expert=False.
 
@@ -951,7 +959,12 @@ def invoke_fused_moe_kernel(
         ),
     )
 
-    K = B.shape[2] - padded_size
+    if use_packed_int4:
+        assert use_int8_w8a8 and per_channel_quant and block_shape is None
+        assert not (a_use_tma or b_use_tma)
+        assert B.dtype == torch.int8 and A.shape[1] == 2 * B.shape[2]
+        assert config["BLOCK_SIZE_K"] % 2 == 0
+    K = B.shape[2] * (2 if use_packed_int4 else 1) - padded_size
     if K % config["BLOCK_SIZE_K"] == 0:
         even_Ks = True
     else:
@@ -1081,7 +1094,7 @@ def invoke_fused_moe_kernel(
             num_tokens_post_padded,
             add_output_mask,
             B.shape[1],
-            B.shape[2] - padded_size,
+            K,
             sorted_token_ids.shape[0],
             topk_ids.numel(),
             A.stride(0),
@@ -1105,6 +1118,7 @@ def invoke_fused_moe_kernel(
             compute_type=compute_type,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
+            use_packed_int4=use_packed_int4,
             use_int8_w8a16=use_int8_w8a16,
             per_channel_quant=per_channel_quant,
             even_Ks=even_Ks,
