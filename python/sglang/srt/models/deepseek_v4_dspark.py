@@ -1006,6 +1006,10 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
         params_dict = dict(self.named_parameters())
         loaded_params = set()
+        channel_int4 = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "slimquant_w4a8"
+        )
 
         weights = _dequant_fp8_wo_a_streaming(weights)
         n_routed_experts = _dspark_stage_config(self.config).n_routed_experts
@@ -1028,6 +1032,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
             )
             if mapped is None:
                 continue
+            if channel_int4 and mapped.endswith(".weight_scale_inv"):
+                mapped = mapped.removesuffix("_inv")
             if _is_npu and mapped in ("embed_tokens.weight", "lm_head.weight"):
                 if not self.uses_own_vocab_modules:
                     continue
@@ -1069,6 +1075,8 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
                         continue
                     param = params_dict[candidate]
                     weight_loader = param.weight_loader
+                    if channel_int4 and mapped.endswith(".weight_scale"):
+                        loaded_weight = loaded_weight * 16.0
                     weight_loader(
                         param,
                         loaded_weight,

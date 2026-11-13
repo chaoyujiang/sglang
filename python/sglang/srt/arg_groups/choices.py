@@ -52,6 +52,7 @@ QUANTIZATION_CHOICES = [
     "mxfp4",  # MOE-only.
     "auto-round",
     "auto-round-int8",
+    "slimquant_w4a8",
     "compressed-tensors",  # for Ktransformers
     "modelslim",  # for NPU
     "mxfp_w4a8",  # for NPU W4A8 (MXFP4 weights + MXFP8 activations)
