@@ -382,3 +382,26 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
 
         quant_info = self.get_triton_quant_info(layer)
         return self.runner.run(dispatch_output, quant_info)
+
+
+class SlimQuantW4A8Config(W8A8Int8Config):
+    """DeepSeek V4 packed INT4 experts and channel-wise INT8 projections."""
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "slimquant_w4a8"
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 90
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[QuantizeMethodBase]:
+        from sglang.srt.layers.linear import LinearBase
+
+        if isinstance(layer, LinearBase) and prefix.endswith(
+            (".weights_proj", ".wo_a")
+        ):
+            return UnquantizedLinearMethod()
+        return super().get_quant_method(layer, prefix)

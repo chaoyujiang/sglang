@@ -46,7 +46,10 @@ from sglang.srt.layers.quantization.quark.quark import QuarkConfig
 from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
 from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
-from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
+from sglang.srt.layers.quantization.w8a8_int8 import (
+    SlimQuantW4A8Config,
+    W8A8Int8Config,
+)
 from sglang.srt.platforms import current_platform
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -87,6 +90,7 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "quark_mxfp4": QuarkConfig,
     "auto-round": AutoRoundConfig,
     "auto-round-int8": W8A8Int8Config,
+    "slimquant_w4a8": SlimQuantW4A8Config,
     "modelslim": ModelSlimConfig,
     "quark_int4fp8_moe": QuarkInt4Fp8Config,
     "humming": HummingConfig,

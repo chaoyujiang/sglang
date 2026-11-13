@@ -5025,7 +5025,9 @@ class DeepseekV4ForCausalLM(nn.Module):
         built."""
         # Need to disable if quant precision mismatch, even if
         # --enforce-shared-experts-fusion is specified
-        if quant_blocks_shared_experts_fusion(quant_config):
+        if (
+            quant_config is not None and quant_config.get_name() == "slimquant_w4a8"
+        ) or quant_blocks_shared_experts_fusion(quant_config):
             return (
                 "Quantization keeps shared experts at a higher precision than the "
                 "routed experts, so they cannot be fused into the quantized "
@@ -5472,6 +5474,10 @@ class DeepseekV4ForCausalLM(nn.Module):
         if not (self.wo_a_fp8 or self.use_npu_arch35_mxfp8_wo_a):
             weights = _prepare_deepseek_v4_weights(weights, self.quant_config)
 
+        channel_int4 = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "slimquant_w4a8"
+        )
         stacked_params_mapping = DEEPSEEK_V4_STACKED_PARAMS_MAPPING
 
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -5540,6 +5546,8 @@ class DeepseekV4ForCausalLM(nn.Module):
                         is_nextn=is_nextn,
                         num_hidden_layers=self.config.num_hidden_layers,
                     )
+                    if channel_int4 and name.endswith(".weight_scale_inv"):
+                        name = name.removesuffix("_inv")
                     if _is_npu:
                         name = name.replace("weight_packed", "weight")
 
@@ -5647,6 +5655,11 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 skip_unmaterialized_expert_param = True
                                 continue
                             param = params_dict[resolved_name]
+                            if channel_int4:
+                                if name.endswith(".weight_scale"):
+                                    loaded_weight = loaded_weight * 16.0
+                                elif name.endswith(".weight"):
+                                    loaded_weight = _unpack_channel_int4(loaded_weight)
                             weight_loader = param.weight_loader
                             maybe_executor_submit(
                                 executor=executor,
@@ -5730,8 +5743,10 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 and (
                                     name.endswith(".wq_a.weight")
                                     or name.endswith(".wq_a.weight_scale_inv")
+                                    or (channel_int4 and name.endswith(".wq_a.weight_scale"))
                                     or name.endswith(".wkv.weight")
                                     or name.endswith(".wkv.weight_scale_inv")
+                                    or (channel_int4 and name.endswith(".wkv.weight_scale"))
                                     or name.endswith(".wq_a.qweight")
                                     or name.endswith(".wkv.qweight")
                                     or name.endswith(".wq_a.qweight_type")
@@ -6001,3 +6016,10 @@ def _fuse_deepseek_v4_wqkv_a_pair(
             )
         return q
     return torch.cat([q, kv], dim=0)
+
+
+def _unpack_channel_int4(weight: torch.Tensor) -> torch.Tensor:
+    """Expand signed high-nibble-first INT4 for the Triton INT8 MoE runner."""
+    high = weight >> 4
+    low = (weight << 4) >> 4
+    return torch.stack((high, low), dim=-1).flatten(-2)
